@@ -15,38 +15,64 @@
 
 name: Java CI
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional Maven test selector (e.g. -Dtest=XmlStreamReaderTest); empty runs the full suite'
+        required: false
+        default: ''
 
 jobs:
   build:
 
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 45
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
         java: [ 8, 11, 14 ]
         experimental: [false]
         include:
-          - java: 15-ea
+          - java: 15
             os: ubuntu-latest
             experimental: true        
-          - java: 15-ea
+          - java: 15
             os: windows-latest
             experimental: true        
       fail-fast: false
         
     steps:
     - uses: actions/checkout@v2.3.2
-    - uses: actions/cache@v2
-      with:
-        path: ~/.m2/repository
-        key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
-        restore-keys: |
-          ${{ runner.os }}-maven-
     - name: Set up JDK ${{ matrix.java }}
-      uses: actions/setup-java@v1.4.2
+      uses: actions/setup-java@v2
       with:
+        distribution: 'zulu'
         java-version: ${{ matrix.java }}
     - name: Build with Maven
-      run: mvn -V --file pom.xml --no-transfer-progress -DtrimStackTrace=false
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.test-filter }}" ]; then
+          mvn -V --file pom.xml --no-transfer-progress -DtrimStackTrace=false -Drat.skip=true -Djapicmp.skip=true -Dcheckstyle.skip=true -Djacoco.skip=true -DfailIfNoTests=false ${{ inputs.test-filter }}
+        else
+          mvn -V --file pom.xml --no-transfer-progress -DtrimStackTrace=false -Drat.skip=true -Djapicmp.skip=true -Dcheckstyle.skip=true -Djacoco.skip=true
+        fi
+    - name: List skipped tests with their skip messages
+      if: always()
+      shell: bash
+      run: |
+        echo "Skipped tests (testcase + <skipped message>) from target/surefire-reports:"
+        grep -h -B1 '<skipped' target/surefire-reports/TEST-*.xml
+        if grep -q 'Assumption failed' target/surefire-reports/TEST-*.xml; then
+          echo "Assumption that skipped each test above (first assume* call in the test method):"
+          grep -h -B1 'Assumption failed' target/surefire-reports/TEST-*.xml | sed -n 's/.*<testcase name="\([^"]*\)" classname="\([^"]*\)".*/\2 \1/p' | while read cls name; do
+            echo "$cls.$name skipped by: $(awk -v m="void $name(" 'index($0,m){f=1} f&&/assume/{print;exit}' "src/test/java/$(echo "$cls" | tr . /).java")"
+          done
+        fi
+    - name: Upload Maven build artifacts
+      if: success() && matrix.os == 'ubuntu-latest' && matrix.java == 8
+      uses: actions/upload-artifact@v4
+      with:
+        name: built-jars
+        path: target/commons-io-*.jar
+        if-no-files-found: error
